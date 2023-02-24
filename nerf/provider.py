@@ -13,16 +13,17 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from .utils import get_rays, safe_normalize
+from nerf.utils import get_rays, safe_normalize
 
 DIR_COLORS = np.array([
-    [255, 0, 0, 255], # front
-    [0, 255, 0, 255], # side
-    [0, 0, 255, 255], # back
-    [255, 255, 0, 255], # side
-    [255, 0, 255, 255], # overhead
-    [0, 255, 255, 255], # bottom
+    [255, 0, 0, 255],  # front
+    [0, 255, 0, 255],  # side
+    [0, 0, 255, 255],  # back
+    [255, 255, 0, 255],  # side
+    [255, 0, 255, 255],  # overhead
+    [0, 255, 255, 255],  # bottom
 ], dtype=np.uint8)
+
 
 def visualize_poses(poses, dirs, size=0.1):
     # poses: [B, 4, 4], dirs: [B]
@@ -48,6 +49,7 @@ def visualize_poses(poses, dirs, size=0.1):
         objects.append(segs)
 
     trimesh.Scene(objects).show()
+
 
 def get_view_direction(thetas, phis, overhead, front):
     #                   phis [B,];          thetas: [B,]
@@ -85,7 +87,7 @@ def rand_poses(size, device, radius_range=[1, 1.5], theta_range=[0, 120], phi_ra
     phi_range = np.deg2rad(phi_range)
     angle_overhead = np.deg2rad(angle_overhead)
     angle_front = np.deg2rad(angle_front)
-    
+
     radius = torch.rand(size, device=device) * (radius_range[1] - radius_range[0]) + radius_range[0]
 
     if random.random() < uniform_sphere_rate:
@@ -96,8 +98,8 @@ def rand_poses(size, device, radius_range=[1, 1.5], theta_range=[0, 120], phi_ra
                 (torch.rand(size, device=device) - 0.5) * 2.0,
             ], dim=-1), p=2, dim=1
         )
-        thetas = torch.acos(unit_centers[:,1])
-        phis = torch.atan2(unit_centers[:,0], unit_centers[:,2])
+        thetas = torch.acos(unit_centers[:, 1])
+        phis = torch.atan2(unit_centers[:, 0], unit_centers[:, 2])
         phis[phis < 0] += 2 * np.pi
         centers = unit_centers * radius.unsqueeze(-1)
     else:
@@ -108,7 +110,7 @@ def rand_poses(size, device, radius_range=[1, 1.5], theta_range=[0, 120], phi_ra
             radius * torch.sin(thetas) * torch.sin(phis),
             radius * torch.cos(thetas),
             radius * torch.sin(thetas) * torch.cos(phis),
-        ], dim=-1) # [B, 3]
+        ], dim=-1)  # [B, 3]
 
     targets = 0
 
@@ -121,7 +123,7 @@ def rand_poses(size, device, radius_range=[1, 1.5], theta_range=[0, 120], phi_ra
     forward_vector = safe_normalize(targets - centers)
     up_vector = torch.FloatTensor([0, -1, 0]).to(device).unsqueeze(0).repeat(size, 1)
     right_vector = safe_normalize(torch.cross(forward_vector, up_vector, dim=-1))
-    
+
     if jitter:
         up_noise = torch.randn_like(up_vector) * 0.02
     else:
@@ -137,12 +139,55 @@ def rand_poses(size, device, radius_range=[1, 1.5], theta_range=[0, 120], phi_ra
         dirs = get_view_direction(thetas, phis, angle_overhead, angle_front)
     else:
         dirs = None
-    
+
+    return poses, dirs
+
+
+def rand_poses_insideout(size, device, radius_range=[1, 1.5], theta_range=[0, 120], phi_range=[0, 360], return_dirs=False, angle_overhead=30, angle_front=60, jitter=False, uniform_sphere_rate=0.5):
+
+    theta_range = np.deg2rad(theta_range)
+    phi_range = np.deg2rad(phi_range)
+    radius_range = [0, 0.25]
+    radius = torch.rand(size, device=device) * (radius_range[1] - radius_range[0]) + radius_range[0]
+    thetas = torch.rand(size, device=device) * (theta_range[1] - theta_range[0]) + theta_range[0]
+    phis = torch.rand(size, device=device) * (phi_range[1] - phi_range[0]) + phi_range[0]
+
+    centers = torch.stack([
+        radius * torch.sin(thetas) * torch.sin(phis),
+        radius * torch.cos(thetas),
+        radius * torch.sin(thetas) * torch.cos(phis),
+    ], dim=-1)  # [B, 3]
+
+    targets = (torch.rand([size, 3], device=device) * 2 - 1) * radius_range[1]
+    if random.random() > 0.5:
+        targets[..., 0] = 1.0 * 1 if random.random() > 0.5 else -1
+        targets[..., 2] = random.random() * 2 - 1
+    else:
+        targets[..., 0] = random.random() * 2 - 1
+        targets[..., 2] = 1.0 * 1 if random.random() > 0.5 else -1
+
+    # lookat
+    forward_vector = safe_normalize(targets - centers)
+    up_vector = torch.FloatTensor([0, -1, 0]).to(device).unsqueeze(0).repeat(size, 1)
+    right_vector = safe_normalize(torch.cross(forward_vector, up_vector, dim=-1))
+
+    if jitter:
+        up_noise = torch.randn_like(up_vector) * 0.02
+    else:
+        up_noise = 0
+
+    up_vector = safe_normalize(torch.cross(right_vector, forward_vector, dim=-1) + up_noise)
+
+    poses = torch.eye(4, dtype=torch.float, device=device).unsqueeze(0).repeat(size, 1, 1)
+    poses[:, :3, :3] = torch.stack((right_vector, up_vector, forward_vector), dim=-1)
+    poses[:, :3, 3] = centers
+
+    dirs = None
+
     return poses, dirs
 
 
 def circle_poses(device, radius=1.25, theta=60, phi=0, return_dirs=False, angle_overhead=30, angle_front=60):
-
     theta = np.deg2rad(theta)
     phi = np.deg2rad(phi)
     angle_overhead = np.deg2rad(angle_overhead)
@@ -155,7 +200,7 @@ def circle_poses(device, radius=1.25, theta=60, phi=0, return_dirs=False, angle_
         radius * torch.sin(thetas) * torch.sin(phis),
         radius * torch.cos(thetas),
         radius * torch.sin(thetas) * torch.cos(phis),
-    ], dim=-1) # [B, 3]
+    ], dim=-1)  # [B, 3]
 
     # lookat
     forward_vector = - safe_normalize(centers)
@@ -171,17 +216,47 @@ def circle_poses(device, radius=1.25, theta=60, phi=0, return_dirs=False, angle_
         dirs = get_view_direction(thetas, phis, angle_overhead, angle_front)
     else:
         dirs = None
-    
-    return poses, dirs    
-    
+
+    return poses, dirs
+
+
+def circle_poses_inside_out(device, radius=1.25, theta=60, phi=0, return_dirs=False, angle_overhead=30, angle_front=60):
+    theta = 90
+    theta = np.deg2rad(theta)
+    phi = np.deg2rad(phi)
+
+    radius = 0.2
+    thetas = torch.FloatTensor([theta]).to(device)
+    phis = torch.FloatTensor([phi]).to(device)
+
+    centers = torch.stack([
+        radius * torch.sin(thetas) * torch.sin(phis),
+        radius * torch.cos(thetas),
+        radius * torch.sin(thetas) * torch.cos(phis),
+    ], dim=-1)  # [B, 3]
+
+    # lookat
+    forward_vector = safe_normalize(centers)
+    up_vector = torch.FloatTensor([0, 1, 0]).to(device).unsqueeze(0)
+    right_vector = safe_normalize(torch.cross(forward_vector, up_vector, dim=-1))
+    up_vector = safe_normalize(torch.cross(forward_vector, right_vector, dim=-1))
+
+    poses = torch.eye(4, dtype=torch.float, device=device).unsqueeze(0)
+    poses[:, :3, :3] = torch.stack((right_vector, up_vector, forward_vector), dim=-1)
+    poses[:, :3, 3] = centers
+
+    dirs = None
+
+    return poses, dirs
+
 
 class NeRFDataset:
     def __init__(self, opt, device, type='train', H=256, W=256, size=100):
         super().__init__()
-        
+
         self.opt = opt
         self.device = device
-        self.type = type # train, val, test
+        self.type = type  # train, val, test
 
         self.H = H
         self.W = W
@@ -190,7 +265,7 @@ class NeRFDataset:
         self.size = size
 
         self.training = self.type in ['train', 'all']
-        
+
         self.cx = self.H / 2
         self.cy = self.W / 2
 
@@ -198,14 +273,14 @@ class NeRFDataset:
         # poses, dirs = rand_poses(100, self.device, radius_range=self.radius_range, return_dirs=self.opt.dir_text, angle_overhead=self.opt.angle_overhead, angle_front=self.opt.angle_front, jitter=self.opt.jitter_pose, uniform_sphere_rate=1)
         # visualize_poses(poses.detach().cpu().numpy(), dirs.detach().cpu().numpy())
 
-
     def collate(self, index):
 
-        B = len(index) # always 1
+        B = len(index)  # always 1
 
         if self.training:
             # random pose on the fly
-            poses, dirs = rand_poses(B, self.device, radius_range=self.radius_range, return_dirs=self.opt.dir_text, angle_overhead=self.opt.angle_overhead, angle_front=self.opt.angle_front, jitter=self.opt.jitter_pose, uniform_sphere_rate=self.opt.uniform_sphere_rate)
+            poses, dirs = rand_poses_insideout(B, self.device, radius_range=self.radius_range, return_dirs=self.opt.dir_text, angle_overhead=self.opt.angle_overhead, angle_front=self.opt.angle_front, jitter=self.opt.jitter_pose,
+                                     uniform_sphere_rate=self.opt.uniform_sphere_rate)
 
             # random focal
             fov = random.random() * (self.fovy_range[1] - self.fovy_range[0]) + self.fovy_range[0]
@@ -214,13 +289,12 @@ class NeRFDataset:
         else:
             # circle pose
             phi = (index[0] / self.size) * 360
-            poses, dirs = circle_poses(self.device, radius=self.radius_range[1] * 1.2, theta=60, phi=phi, return_dirs=self.opt.dir_text, angle_overhead=self.opt.angle_overhead, angle_front=self.opt.angle_front)
+            poses, dirs = circle_poses_inside_out(self.device, radius=self.radius_range[1] * 1.2, theta=60, phi=phi, return_dirs=self.opt.dir_text, angle_overhead=self.opt.angle_overhead, angle_front=self.opt.angle_front)
 
             # fixed focal
             fov = (self.fovy_range[1] + self.fovy_range[0]) / 2
             focal = self.H / (2 * np.tan(np.deg2rad(fov) / 2))
             intrinsics = np.array([focal, focal, self.cx, self.cy])
-
 
         # sample a low-resolution but full image for CLIP
         rays = get_rays(poses, intrinsics, self.H, self.W, -1)
@@ -235,7 +309,89 @@ class NeRFDataset:
 
         return data
 
-
     def dataloader(self):
         loader = DataLoader(list(range(self.size)), batch_size=1, collate_fn=self.collate, shuffle=self.training, num_workers=0)
         return loader
+
+
+def visualize_cameras(output_path, cameras, scale=0.10):
+    all_meshes = []
+    for ci in range(len(cameras)):
+        mesh = trimesh.load("resources/camera.obj")
+        mesh = mesh.apply_scale(scale)
+        mesh = mesh.apply_transform(cameras[ci])
+        all_meshes.append(mesh)
+    combined = trimesh.util.concatenate(all_meshes)
+    combined.export(output_path)
+
+
+if __name__ == "__main__":
+    B = 1
+    device = torch.device("cuda:0")
+    radius_range = [1.0, 1.5]
+    dir_text = True
+    angle_overhead = 30
+    angle_front = 60
+    jitter_pose = False
+    uniform_sphere_rate = 0.5
+    mode = "circle"
+
+    if mode == "rand":
+        cameras = []
+        for i in tqdm.tqdm(range(100)):
+            poses, dirs = rand_poses(
+                B,
+                device,
+                radius_range=radius_range,
+                return_dirs=dir_text,
+                angle_overhead=angle_overhead,
+                angle_front=angle_front,
+                jitter=jitter_pose,
+                uniform_sphere_rate=uniform_sphere_rate
+            )
+            cameras.append(poses[0].cpu().numpy())
+        visualize_cameras("sampled_cam.obj", cameras)
+
+        cameras = []
+        for i in tqdm.tqdm(range(100)):
+            poses, dirs = rand_poses_insideout(
+                B,
+                device,
+                radius_range=radius_range,
+                return_dirs=dir_text,
+                angle_overhead=angle_overhead,
+                angle_front=angle_front,
+                jitter=jitter_pose,
+                uniform_sphere_rate=uniform_sphere_rate
+            )
+            cameras.append(poses[0].cpu().numpy())
+        visualize_cameras("sampled_cam_inside_out.obj", cameras)
+    elif mode == "circle":
+        # circle pose
+        cameras = []
+        for i in tqdm.tqdm(range(100)):
+            poses, dirs = circle_poses(
+                device,
+                radius=radius_range[1] * 1.2,
+                theta=60,
+                phi=i * 360 / 100,
+                return_dirs=dir_text,
+                angle_overhead=angle_overhead,
+                angle_front=angle_front
+            )
+            cameras.append(poses[0].cpu().numpy())
+        visualize_cameras("circle_cam.obj", cameras)
+
+        cameras = []
+        for i in tqdm.tqdm(range(5)):
+            poses, dirs = circle_poses_inside_out(
+                device,
+                radius=radius_range[1] * 1.2,
+                theta=60,
+                phi=i * 360 / 5,
+                return_dirs=dir_text,
+                angle_overhead=angle_overhead,
+                angle_front=angle_front
+            )
+            cameras.append(poses[0].cpu().numpy())
+        visualize_cameras("circle_cam_inside_out.obj", cameras)
